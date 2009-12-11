@@ -10,10 +10,20 @@ This library also allows for the handling of prepared queries and parameterized 
 	var sys = require("sys");
 	var Postgres = require("./postgres");
 
+	Postgres.DEBUG= 1;
+
 	var db = new Postgres.Connection("database", "username", "password");
-	db.query("SELECT * FROM sometable", function (data) {
-		sys.p(data);
+
+	var promise = db.query("SELECT * FROM test");
+
+	promise.addCallback(function (data) {
+	  sys.p(data);
 	});
+
+	promise.addErrback(function (error_message) {
+		sys.debug(error_message);
+	});
+
 	db.close();
 
 ## Example use of Parameterized Queries
@@ -22,7 +32,7 @@ This library also allows for the handling of prepared queries and parameterized 
     var pg = require("postgres.js");
     
     var db = new pg.Connection("database", "username", "password");
-    db.query("SELECT * FROM yourtable WHERE id = ?", [1], function (data) {
+    db.query("SELECT * FROM yourtable WHERE id = ?", [1]).addCallback(function (data) {
         
         sys.p(data);
     });
@@ -35,10 +45,10 @@ This library also allows for the handling of prepared queries and parameterized 
     
     var db = new pg.Connection("database", "username", "password");
     
-    db.prepare("SELECT * FROM yourtable WHERE id = ?").addCallback( function (query) {
+    db.prepare("SELECT * FROM yourtable WHERE id = ?").addCallback(function (query) {
 
         sys.p(query);
-        query.execute(["1"], function (d) {
+        query.execute(["1"]).addCallback(function (d) {
             sys.p(d);
         });
         /* More queries here. */

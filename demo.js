@@ -1,9 +1,11 @@
 var sys = require("sys");
 var Postgres = require("./postgres");
 
-var db = new Postgres.Connection("dbname", "username", "password");
+Postgres.DEBUG= 1;
+
+var db = new Postgres.Connection("database", "username", "password");
 db.query("SELECT * FROM test");
-db.query("SELECT * FROM test", function (data) {
+db.query("SELECT * FROM test").addCallback(function (data) {
   sys.p(data);
 });
 db.close();

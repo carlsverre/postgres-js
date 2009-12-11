@@ -172,8 +172,9 @@ function parse_response(code, stream) {
 
 
 exports.Connection = function (database, username, password, port, host) {
-  var connection, events, query_queue, row_description, query_callback, results, readyState, closeState;
-  
+  var connection, events, query_queue, row_description, results, readyState, closeState;
+  var query_callback, query_promise;
+
   // Default to port 5432
   if (port === undefined) {
     port = 5432;
@@ -252,6 +253,7 @@ exports.Connection = function (database, username, password, port, host) {
     if (e.S === 'FATAL') {
       sys.debug(e.S + ": " + e.M);
       connection.close();
+      if(query_promise) query_promise.emitError(e.M);
     }
   });
   events.addListener('ParameterStatus', function(key, value) {
@@ -260,7 +262,8 @@ exports.Connection = function (database, username, password, port, host) {
   events.addListener('ReadyForQuery', function () {
     if (query_queue.length > 0) {
       var query = query_queue.shift();
-      query_callback = query.callback || function() {};
+      query_callback = query.callback || null;
+      query_promise = query.promise || null;
       sendMessage('Query', [query.sql]);
       readyState = false;
     } else {
@@ -311,114 +314,113 @@ exports.Connection = function (database, username, password, port, host) {
     results.push(row);
   });
   events.addListener('CommandComplete', function (data) {
-    query_callback.call(this, results);
+    if(query_callback) query_callback(results);
+    else if(query_promise) query_promise.emitSuccess(results);
   });
 
-  this.query = function (sql, args, callback) {
+  this.query = function (sql, args) {
+    var promise = new process.Promise();
+
+    if (args == null) {
       
-      if (callback == null) {
-          
-          // This has no parameters to manipulate.
-          
-          // Assume the args value is the callback
-          sys.puts("Null callback");
-          sys.p(args);
-          query_queue.push({sql: sql, callback: args || function () {}  });
-          if (readyState) {
-            events.emit('ReadyForQuery');
-          }
-      }
-      else {
-          // We have an args list.
-          // This means, we have to map our ?'s and test for a variety of 
-          // edge cases.
-          sys.puts("Got args.");
-          var i = 0;
-          var slice = md5(md5(sql));
-          //sys.p(slice);
-          var offset = Math.floor(Math.random() * 10);
-          cont = "$" + slice.replace(/\d/g, "").slice(offset,4+offset) + "$";
-          var treated = sql;
-          sys.p(cont);
-          if (sql.match(/\?/)) {
-              treated = sql.replace(/\?/g, function (str, offset, s) {
-                  if (!args[i]) {
-                      // raise an error
-                      throw new Error("Argument "+i+" does not exist!");
-                  }
-                  return cont+args[i]+cont;
-              } );
-          }
-          sys.p(treated);
-          query_queue.push({sql: treated, callback: callback});
-          if (readyState) {
-            events.emit('ReadyForQuery');
-          }
-      }
+      // This has no parameters to manipulate.
       
+      query_queue.push({sql: sql, promise: promise});
+      if (readyState) {
+        events.emit('ReadyForQuery');
+      }
+    }
+    else {
+      // We have an args list.
+      // This means, we have to map our ?'s and test for a variety of 
+      // edge cases.
+      sys.puts("Got args.");
+      var i = 0;
+      var slice = md5(md5(sql));
+      //sys.p(slice);
+      var offset = Math.floor(Math.random() * 10);
+      cont = "$" + slice.replace(/\d/g, "").slice(offset,4+offset) + "$";
+      var treated = sql;
+      sys.p(cont);
+      if (sql.match(/\?/)) {
+        treated = sql.replace(/\?/g, function (str, offset, s) {
+          if (!args[i]) {
+            // raise an error
+            throw new Error("Argument "+i+" does not exist!");
+          }
+          return cont+args[i]+cont;
+        } );
+      }
+      sys.p(treated);
+      query_queue.push({sql: treated, promise: promise});
+      if (readyState) {
+        events.emit('ReadyForQuery');
+      }
+    }
+
+    return promise;
   };
   
   this.prepare = function (query) {
+    
+    var r = new process.Promise();
+    var name = md5(md5(query));
+    var offset = Math.floor(Math.random() * 10);
+    name = name.replace(/\d/g, "").slice(offset,4+offset);
+    
+    var treated = query;
+    var i = 0;
+    if (query.match(/\?/)) {
       
-      var r = new process.Promise();
-      var name = md5(md5(query));
-      var offset = Math.floor(Math.random() * 10);
-      name = name.replace(/\d/g, "").slice(offset,4+offset);
-      
-      var treated = query;
-      var i = 0;
-      if (query.match(/\?/)) {
-          
-          treated = treated.replace(/\?/g, function (str, p1, offset, s) {
-              i = i + 1;
-              return "$"+i;
-          });
-      }
-      
-      stmt = "PREPARE " + name + " AS " + treated;
-      
-      var conn = this;
-      
-      query_queue.push({sql: stmt, callback: function (c) {
-          // R is going to be null or otherwise weird, as we're emitting
-          // a PREPARE, instead of anything that would return useful data
-          // from the database.
-          var q = new Stmt(name, i, conn );
-          r.emitSuccess(q);
-      }
+      treated = treated.replace(/\?/g, function (str, p1, offset, s) {
+        i = i + 1;
+        return "$"+i;
       });
-      return r;
+    }
+    
+    stmt = "PREPARE " + name + " AS " + treated;
+    
+    var conn = this;
+    
+    query_queue.push({sql: stmt, callback: function (c) {
+        var q = new Stmt(name, i, conn );
+        r.emitSuccess(q);
+      }
+    });
+    return r;
   };
   
   this.close = function () {
-    closeState = true;
+  closeState = true;
   };
   
 };
 
 function Stmt (name, len, conn) {
-    var stmt = "EXECUTE "+name+" ( ";
-    var que = [];
-    for (var i = 1; i<=len; i++) {
-        que.push("?");
+  var stmt = "EXECUTE "+name+" ( ";
+  var que = [];
+  for (var i = 1; i<=len; i++) {
+    que.push("?");
+  }
+  stmt = stmt + que.join(",") + " )";
+  
+  sys.puts(stmt);
+  
+  this.execute = function (args) {
+    if (args.length > len) {
+      throw new Error("Cannot execute: Too many arguments");
     }
-    stmt = stmt + que.join(",") + " )";
-    
-    sys.puts(stmt);
-    
-    this.execute = function (args, callback) {
-        if (args.length > len) {
-            throw new Error("Cannot execute: Too many arguments");
-        }
-        else if (args.length < len) {
-            // Pad out the length with nulls.
-            for (var i = args.length; i<= len; i++) {
-                args.push(null);
-            }
-        }
-        else {
-            // Nothing to see here.
-            ;
-        }
-        return conn.query(stmt, args, callback);
-    };
+    else if (args.length < len) {
+      // Pad out the length with nulls.
+      for (var i = args.length; i<= len; i++) {
+        args.push(null);
+      }
+    }
+    else {
+      // Nothing to see here.
+      ;
+    }
+
+    return conn.query(stmt, args);
+  };
+}
