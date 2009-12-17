@@ -190,6 +190,11 @@ exports.Connection = function (database, username, password, port, host) {
   query_queue = [];
   readyState = false;
   closeState = false;
+  timedout = false;
+
+  function reconnect() {
+    connection.connect(port, host=t_host);
+  }
 
   // Sends a message to the postgres server
   function sendMessage(type, args) {
@@ -235,10 +240,17 @@ exports.Connection = function (database, username, password, port, host) {
   connection.addListener("eof", function (data) {
     connection.close();
   });
-  connection.addListener("disconnect", function (had_error) {
+  connection.addListener("close", function (had_error) {
     if (had_error) {
       sys.debug("CONNECTION DIED WITH ERROR");
+    } else if (timedout) {
+      reconnect();
+      timedout = false;
     }
+  });
+  connection.addListener("timeout", function () {
+    info("server timed out...  reconnecting");
+    timedout = true;
   });
 
   // Set up callbacks to automatically do the login
@@ -253,13 +265,17 @@ exports.Connection = function (database, username, password, port, host) {
     if (e.S === 'FATAL') {
       sys.debug(e.S + ": " + e.M);
       connection.close();
-      if(query_promise) query_promise.emitError(e.M);
     }
+    if(query_promise != null) query_promise.emitError(e.M);
   });
   events.addListener('ParameterStatus', function(key, value) {
     postgres_parameters[key] = value;
   });
   events.addListener('ReadyForQuery', function () {
+    if(connection.readyState == "closed") {
+      reconnect();
+      return;
+    }
     if (query_queue.length > 0) {
       var query = query_queue.shift();
       query_callback = query.callback || null;
@@ -334,24 +350,24 @@ exports.Connection = function (database, username, password, port, host) {
       // We have an args list.
       // This means, we have to map our ?'s and test for a variety of 
       // edge cases.
-      sys.puts("Got args.");
+      if(exports.DEBUG > 0) sys.puts("Got args.");
       var i = 0;
       var slice = md5(md5(sql));
       //sys.p(slice);
       var offset = Math.floor(Math.random() * 10);
       cont = "$" + slice.replace(/\d/g, "").slice(offset,4+offset) + "$";
       var treated = sql;
-      sys.p(cont);
+      if(exports.DEBUG > 0) sys.p(cont);
       if (sql.match(/\?/)) {
         treated = sql.replace(/\?/g, function (str, offset, s) {
           if (!args[i]) {
             // raise an error
             throw new Error("Argument "+i+" does not exist!");
           }
-          return cont+args[i]+cont;
+          return cont+args[i++]+cont;
         } );
       }
-      sys.p(treated);
+      if(exports.DEBUG > 0) sys.p(treated);
       query_queue.push({sql: treated, promise: promise});
       if (readyState) {
         events.emit('ReadyForQuery');
@@ -404,7 +420,7 @@ function Stmt (name, len, conn) {
   }
   stmt = stmt + que.join(",") + " )";
   
-  sys.puts(stmt);
+  if(exports.DEBUG > 0) sys.puts(stmt);
   
   this.execute = function (args) {
     if (args.length > len) {
